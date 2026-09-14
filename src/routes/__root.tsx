@@ -15,6 +15,7 @@ import { SiteConfigProvider } from "../lib/use-site-config";
 import { AdminProvider } from "../lib/use-admin";
 import { AdminBar } from "../components/admin/AdminBar";
 import { AdminModals } from "../components/admin/AdminModals";
+import { RuntimeConfig } from "../components/RuntimeConfig";
 
 function NotFoundComponent() {
   return (
@@ -155,8 +156,18 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
+      <SiteConfigProvider>
+        <AdminProvider>
+          {/* Áp dụng theme/tracking/SEO động từ cấu hình đã lưu */}
+          <RuntimeConfig />
+          {/* Thanh quản trị 28 nút — chỉ hiện khi Admin đăng nhập */}
+          <AdminBar />
+          {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+          <Outlet />
+          {/* Cụm modal cho toàn bộ công cụ Admin */}
+          <AdminModals />
+        </AdminProvider>
+      </SiteConfigProvider>
     </QueryClientProvider>
   );
 }

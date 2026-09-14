@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
 import { toast } from "sonner";
-import { MAKE_WEBHOOK_URL } from "@/lib/config";
 import { trackFormStart, trackLead } from "@/lib/tracking";
 import {
   collectBehavior,
@@ -11,7 +10,13 @@ import {
   markCopyPaste,
   markFormStart,
   markIndustrySwitch,
+  scoreLead,
 } from "@/lib/behavior";
+import { getVariant, utmSource } from "@/lib/ab";
+import { useSiteConfig } from "@/lib/use-site-config";
+import { dispatchLead } from "@/services/webhooks";
+import { saveLead, trackConversion, type LeadRecord } from "@/services/dataAdapter";
+import { sendLeadEmail } from "@/lib/email.functions";
 
 export const MAJORS = [
   "Công nghệ Ô tô điện",
@@ -113,22 +118,21 @@ type Status = "idle" | "sending" | "done" | "error";
 const inputClass =
   "w-full rounded-xl border border-input bg-background px-4 py-3.5 text-base outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/30";
 
-/** Rate limiting: tối đa 3 lần gửi trong 5 phút / trình duyệt */
+/** Rate limiting: giới hạn số lần gửi trong 1 cửa sổ thời gian / trình duyệt (cấu hình trong Admin). */
 const RATE_KEY = "lp_rate";
-const RATE_WINDOW_MS = 5 * 60 * 1000;
-const RATE_MAX = 3;
 
-function rateLimited(): boolean {
+function rateLimited(maxCount: number, windowMin: number): boolean {
   if (typeof window === "undefined") return false;
   const now = Date.now();
+  const windowMs = Math.max(1, windowMin) * 60 * 1000;
   let stamps: number[] = [];
   try {
     stamps = JSON.parse(localStorage.getItem(RATE_KEY) || "[]");
   } catch {
     stamps = [];
   }
-  stamps = stamps.filter((t) => now - t < RATE_WINDOW_MS);
-  if (stamps.length >= RATE_MAX) return true;
+  stamps = stamps.filter((t) => now - t < windowMs);
+  if (stamps.length >= Math.max(1, maxCount)) return true;
   stamps.push(now);
   try {
     localStorage.setItem(RATE_KEY, JSON.stringify(stamps));
@@ -139,6 +143,7 @@ function rateLimited(): boolean {
 }
 
 export function LeadForm({ id = "dang-ky" }: { id?: string }) {
+  const { config } = useSiteConfig();
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
   const [form, setForm] = useState(EMPTY);
@@ -188,7 +193,7 @@ export function LeadForm({ id = "dang-ky" }: { id?: string }) {
       return;
     }
 
-    if (rateLimited()) {
+    if (rateLimited(config.form.rateLimitCount, config.form.rateLimitWindowMin)) {
       setError("Bạn đã gửi nhiều lần trong thời gian ngắn. Vui lòng chờ vài phút rồi thử lại.");
       setStatus("error");
       return;
@@ -199,6 +204,9 @@ export function LeadForm({ id = "dang-ky" }: { id?: string }) {
 
     // Micro-behavioral analytics + 4 chuỗi dữ liệu gộp
     const behavior = collectBehavior({ city: form.province, major: form.major });
+    const { score: aiScore, rank: aiRank } = scoreLead(behavior, config.aiAdvisor);
+    const variant = getVariant(config.abTest.enabled, config.abTest.split);
+    const source = utmSource();
 
     const payload = {
       full_name: form.name.trim().slice(0, 100),
@@ -208,6 +216,9 @@ export function LeadForm({ id = "dang-ky" }: { id?: string }) {
       city: form.province,
       source: typeof window !== "undefined" ? window.location.href : "Landing Page UTM",
       created_at: new Date().toISOString(),
+      ab_variant: variant,
+      ai_score: aiScore,
+      ai_rank: aiRank,
       // 4 biến gộp bổ sung (không làm đứt kết nối Make.com hiện có)
       sale_advice: generateSaleAdvice(behavior),
       behavior_summary: generateBehaviorSummary(behavior),
@@ -216,14 +227,47 @@ export function LeadForm({ id = "dang-ky" }: { id?: string }) {
     };
 
     try {
-      if (MAKE_WEBHOOK_URL) {
-        const res = await fetch(MAKE_WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) throw new Error(`Webhook trả về ${res.status}`);
+      // Gửi song song tới mọi kênh Webhook đã cấu hình (Make/Zapier, Telegram, Sheets, Supabase).
+      const { ok } = await dispatchLead(config, payload);
+      if (!ok) throw new Error("Không kênh webhook nào nhận được dữ liệu");
+
+      // Lưu Mini-CRM (localStorage / Supabase) để hiện trong bảng Quản Lý Lead.
+      const leadRecord: LeadRecord = {
+        id: `ld_${Date.now()}`,
+        at: payload.created_at,
+        name: payload.full_name,
+        phone: payload.phone,
+        aiScore,
+        aiRank,
+        utmSource: source,
+        variant,
+      };
+      if (payload.email) leadRecord.email = payload.email;
+      if (payload.city) leadRecord.city = payload.city;
+      if (payload.major) leadRecord.major = payload.major;
+      saveLead(leadRecord);
+
+      // Ghi nhận chuyển đổi cho Analytics Dashboard + A/B comparison.
+      trackConversion(source, config.abTest.enabled ? variant : undefined);
+
+      // Automated Email Sequencer (auto-responder) — chạy phía server nếu bật.
+      if (config.emailAutomation.enabled && email) {
+        const fill = (s: string) =>
+          s
+            .replaceAll("{name}", payload.full_name)
+            .replaceAll("{phone}", payload.phone)
+            .replaceAll("{city}", payload.city || "")
+            .replaceAll("{ai_score}", String(aiScore));
+        void sendLeadEmail({
+          data: {
+            to: email,
+            from: config.emailAutomation.fromEmail || "no-reply@example.com",
+            subject: fill(config.emailAutomation.subject),
+            text: fill(config.emailAutomation.body),
+          },
+        }).catch(() => {});
       }
+
       // Chỉ bắn tracking SAU khi dữ liệu đã gửi thành công
       trackLead({ content_name: form.major || "Du hoc nghe Trung Quoc" });
       setForm(EMPTY);
@@ -231,6 +275,9 @@ export function LeadForm({ id = "dang-ky" }: { id?: string }) {
       toast.success("Đăng ký thành công!", {
         description: "Tư vấn viên sẽ liên hệ lại trong 5 phút.",
       });
+      // Redirect (Thank You Page) nếu Admin cấu hình.
+      const redirect = config.form.redirectUrl?.trim();
+      if (redirect && typeof window !== "undefined") window.location.assign(redirect);
     } catch {
       setError("Có lỗi khi gửi thông tin. Vui lòng kiểm tra kết nối và thử gửi lại.");
       setStatus("error");

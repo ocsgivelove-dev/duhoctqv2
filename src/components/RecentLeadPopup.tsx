@@ -1,72 +1,66 @@
 import { useEffect, useState } from "react";
 
-const NAMES = [
-  "Trần Văn Nam",
-  "Nguyễn Thị Hà",
-  "Lê Minh Quân",
-  "Phạm Thu Trang",
-  "Hoàng Văn Dũng",
-  "Đỗ Thị Mai",
-  "Vũ Đức Anh",
-  "Bùi Thanh Tùng",
-  "Ngô Thị Lan",
-  "Đặng Hữu Phước",
-];
+import { useSiteConfig } from "@/lib/use-site-config";
 
-const CITIES = [
-  "Bình Dương",
-  "Hà Nội",
-  "Bắc Giang",
-  "Nghệ An",
-  "Thanh Hóa",
-  "Hải Phòng",
-  "Đồng Nai",
-  "Thái Nguyên",
-  "Cần Thơ",
-  "Đắk Lắk",
-];
-
-function pick<T>(arr: T[]) {
-  return arr[Math.floor(Math.random() * arr.length)] as T;
+function pick<T>(arr: T[]): T | undefined {
+  return arr.length ? arr[Math.floor(Math.random() * arr.length)] : undefined;
 }
 
-/** Thông báo "khách vừa đăng ký" trượt lên góc dưới bên trái. */
+/** Thông báo "khách vừa đăng ký" trượt lên góc màn hình — dữ liệu & vị trí lấy từ Admin. */
 export function RecentLeadPopup() {
+  const { config } = useSiteConfig();
+  const fomo = config.fomo;
   const [item, setItem] = useState<{ name: string; city: string; mins: number } | null>(null);
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
+    if (!fomo.enabled || fomo.names.length === 0) return;
+
     let hideTimer: number | undefined;
     let nextTimer: number | undefined;
 
+    const displayMs = Math.max(1, fomo.displaySec) * 1000;
+    const minGap = Math.max(1, fomo.minDelaySec) * 1000;
+    const maxGap = Math.max(fomo.minDelaySec, fomo.maxDelaySec) * 1000;
+
     const show = () => {
-      setItem({ name: pick(NAMES), city: pick(CITIES), mins: 1 + Math.floor(Math.random() * 9) });
+      const name = pick(fomo.names) ?? "";
+      const city = pick(fomo.cities) ?? "";
+      setItem({ name, city, mins: 1 + Math.floor(Math.random() * 9) });
       setVisible(true);
-      hideTimer = window.setTimeout(() => setVisible(false), 5500);
-      nextTimer = window.setTimeout(show, 5500 + 10000 + Math.random() * 5000);
+      hideTimer = window.setTimeout(() => setVisible(false), displayMs);
+      const gap = minGap + Math.random() * (maxGap - minGap);
+      nextTimer = window.setTimeout(show, displayMs + gap);
     };
 
-    const first = window.setTimeout(show, 6000);
+    const first = window.setTimeout(show, minGap);
     return () => {
       window.clearTimeout(first);
       if (hideTimer) window.clearTimeout(hideTimer);
       if (nextTimer) window.clearTimeout(nextTimer);
     };
-  }, []);
+  }, [fomo.enabled, fomo.names, fomo.cities, fomo.displaySec, fomo.minDelaySec, fomo.maxDelaySec]);
 
-  if (!item) return null;
+  if (!fomo.enabled || !item) return null;
+
+  const message = fomo.template
+    .replaceAll("{name}", item.name)
+    .replaceAll("{city}", item.city)
+    .replaceAll("{mins}", String(item.mins));
+
+  const side =
+    fomo.position === "right"
+      ? "right-3 sm:right-6 left-auto"
+      : "left-3 sm:left-6 right-auto";
 
   return (
     <div
       aria-hidden="true"
-      className={`pointer-events-none fixed bottom-24 left-3 z-40 max-w-[17rem] rounded-2xl bg-card/90 p-3 shadow-[var(--shadow-card)] ring-1 ring-border backdrop-blur transition-all duration-500 sm:bottom-6 sm:left-6 ${
+      className={`pointer-events-none fixed bottom-24 z-40 max-w-[17rem] rounded-2xl bg-card/90 p-3 shadow-[var(--shadow-card)] ring-1 ring-border backdrop-blur transition-all duration-500 sm:bottom-6 ${side} ${
         visible ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-4 opacity-0"
       }`}
     >
-      <p className="text-xs leading-snug text-card-foreground">
-        <span className="font-bold">{item.name}</span>{" "}
-        <span className="text-muted-foreground">({item.city})</span> vừa đăng ký nhận tư vấn
-      </p>
+      <p className="text-xs leading-snug text-card-foreground">{message}</p>
       <p className="mt-1 text-[11px] font-semibold text-primary">{item.mins} phút trước</p>
     </div>
   );
