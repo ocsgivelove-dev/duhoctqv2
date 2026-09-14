@@ -371,6 +371,46 @@ export function collectBehavior(form: { city: string; major: string }): Behavior
 
 /* ---------------- 4 chuỗi gộp ---------------- */
 
+/**
+ * Chấm điểm & phân hạng lead từ hành vi vi mô + cấu hình AI Advisor.
+ * Trả về điểm 0-100 và nhãn phân hạng để lưu Mini-CRM và chèn vào email.
+ */
+export function scoreLead(
+  data: BehaviorData,
+  cfg?: { vipDeviceRegex?: string; keyRegions?: string; fastFillThresholdSec?: number; vipTimeOnPageSec?: number; vipScrollPercent?: number },
+): { score: number; rank: string } {
+  const fastFill = cfg?.fastFillThresholdSec ?? 4;
+  const vipTime = cfg?.vipTimeOnPageSec ?? 80;
+  const vipScroll = cfg?.vipScrollPercent ?? 70;
+
+  if (data.is_headless_browser || data.form_fill_duration_seconds < fastFill || data.submission_count_same_ip > 1) {
+    return { score: 5, rank: "Bot / Ảo" };
+  }
+
+  let score = 45;
+  const safe = (re?: string) => {
+    if (!re) return null;
+    try {
+      return new RegExp(re, "i");
+    } catch {
+      return null;
+    }
+  };
+  const vipDevice = safe(cfg?.vipDeviceRegex) ?? /iPhone (13|14|15|16) Pro|Pro Max|Galaxy S(22|23|24|25)|Fold|Flip/i;
+  const keyRegion = safe(cfg?.keyRegions) ?? /Nghệ An|Hà Tĩnh|Quảng Bình|Thanh Hóa|Quảng Ninh|Hải Phòng/i;
+
+  if (vipDevice.test(data.device_model_name)) score += 20;
+  if (data.time_on_page_seconds >= vipTime) score += 15;
+  if (data.scroll_depth_percent >= vipScroll) score += 12;
+  if (keyRegion.test(data.form_city)) score += 8;
+  if (data.utm_source && data.utm_source !== "Direct") score += 5;
+  if (data.focus_section === "luong_thuc_tap" || data.copied_text_type === "chi_phi") score += 5;
+  score = Math.max(0, Math.min(100, score));
+
+  const rank = score >= 80 ? "VIP" : score >= 65 ? "Tiềm năng cao" : score >= 50 ? "Tiềm năng" : "Cần nuôi dưỡng";
+  return { score, rank };
+}
+
 export function generateSaleAdvice(data: BehaviorData): string {
   const advice: string[] = [];
   const isHighEndDevice =
